@@ -129,6 +129,9 @@ public class MainActivity extends Activity {
             @JavascriptInterface public String readDevice() {
                 return pageReady && !destroyed ? diagnosticDeviceJSON : "{}";
             }
+            @JavascriptInterface public boolean isTelevision() {
+                return DeviceDiagnostics.isTelevision(MainActivity.this);
+            }
         }, "HongguoTVDiagnostics");
         webView.addJavascriptInterface(new PlaybackPreferences(this), "HongguoTVPreferences");
         webView.addJavascriptInterface(new InputBridge(), "HongguoTVInput");
