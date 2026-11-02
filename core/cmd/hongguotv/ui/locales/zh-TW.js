@@ -2,6 +2,9 @@
   'use strict';
   root.HongguoLocales = root.HongguoLocales || {};
   root.HongguoLocales['zh-TW'] = {
+    'settings.startupPage': '啟動頁面',
+    'settings.startupPageDescription': '選擇開啟應用程式時顯示的頁面。返回前景時保留原頁面。',
+    'settings.startupPageCurrent': '下次啟動：{page}',
   "settings.portraitBackground": "直向影片背景",
   "settings.portraitBackgroundDescription": "黑色或目前畫面的動態模糊延伸。動態背景會增加少量處理負擔；裝置不支援或處理較慢時保留黑邊。",
   "settings.portraitBackgroundBlack": "黑色",
@@ -209,6 +212,9 @@
   "hero.currentDrama": "當前推薦短劇",
   "hero.loadingRecommendations": "正在讀取推薦",
   "hero.switchHint": "↑↓ 切換",
+  "hero.navHint": "返回 顯示選單",
+  "player.more": "更多",
+  "player.moreAfterPlay": "開始播放後可使用更多選項",
   "hero.catalogContent": "分類內容",
   "hero.dramaList": "短劇列表",
   "hero.videoActions": "影片操作",

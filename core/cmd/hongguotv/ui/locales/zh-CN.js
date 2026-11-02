@@ -5,6 +5,9 @@
   // without changing the UI or the focus model.
   root.HongguoLocales = root.HongguoLocales || {};
   root.HongguoLocales['zh-CN'] = {
+    'settings.startupPage': '启动页面',
+    'settings.startupPageDescription': '选择打开应用时显示的页面。返回前台时保持原页面。',
+    'settings.startupPageCurrent': '下次启动：{page}',
   "settings.portraitBackground": "竖屏背景",
   "settings.portraitBackgroundDescription": "黑色或当前画面的动态模糊延伸。动态背景增加少量处理开销；设备不支持或处理较慢时保留黑边。",
   "settings.portraitBackgroundBlack": "黑色",
@@ -212,6 +215,9 @@
     'hero.currentDrama': '当前推荐短剧',
     'hero.loadingRecommendations': '正在读取推荐',
     'hero.switchHint': '↑↓ 切换',
+    'hero.navHint': '返回 显示菜单',
+    'player.more': '更多',
+    'player.moreAfterPlay': '开始播放后可使用更多选项',
     'hero.catalogContent': '分类内容',
     'hero.dramaList': '短剧列表',
     'hero.videoActions': '视频操作',

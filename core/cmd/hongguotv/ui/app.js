@@ -58,6 +58,7 @@
     localeActions: '.locale-action',
     recommendationDirection: '.recommendation-direction-action',
     sidebarDisplay: '.sidebar-display-action',
+    startupPage: '.startup-page-action',
     autoCinema: '.auto-cinema-action',
     webosAudio: '.webos-audio-action',
     portraitBackground: '.portrait-background-action',
@@ -146,6 +147,18 @@
       });
       document.getElementById('sidebar-display-state').textContent = data.mode === 'icons' ? uiText('settings.currentIcons', '当前：仅显示图标') : uiText('settings.currentExpanded', '当前：展开显示');
       syncNativePlayerBounds();
+    }
+  });
+  var startupPageSettings = window.HongguoStartupPage.create({
+    storage: sidebarStorage,
+    bridge: window.HongguoTVPreferences,
+    render: function (data) {
+      document.querySelectorAll('.startup-page-action').forEach(function (button) {
+        var selected = button.getAttribute('data-page') === data.page;
+        button.classList.toggle('account-primary', selected);
+        button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
+      document.getElementById('startup-page-state').textContent = uiText('settings.startupPageCurrent', '下次启动：{page}', { page: uiText('nav.' + data.page, data.page) });
     }
   });
   function renderLocaleSettings() {
@@ -320,6 +333,7 @@
   var searchSuggestionReturnKey = '';
   var searchSuggestionFocusedKey = '';
   var searchSuggestionDismissedQuery = '';
+  var searchSuggestionActivation = null;
   var tailTimer = null;
   var playerReturnPage = null;
   var playerReturnFocus = null;
@@ -943,6 +957,8 @@
       seasonButton.setAttribute('aria-label', seasonLabel);
       if (!showSeasons && playbackCommandMenuOpen && (document.activeElement === seasonButton || seasonButton.classList.contains('is-focused'))) goFocus(document.getElementById('player-menu-episodes'));
     }
+    var menuSpeed = document.getElementById('player-menu-speed');
+    if (menuSpeed) menuSpeed.classList.toggle('is-hidden', !playbackSpeedAvailable());
     var fullscreenButton = document.getElementById('player-menu-fullscreen');
     if (fullscreenButton) {
       var full = shell.classList.contains('is-cinema');
@@ -1027,32 +1043,44 @@
 
   function scanModalOpen() { return searchScanOpen || danmakuScanOpen; }
 
+  var allZonesQuery = '';
+  // Dialogs in precedence order: the first open layer owns remote focus.
+  // Add new dialogs here instead of extending each focus check.
+  var modalLayers = [
+    ['#core-connection-modal', function () { return coreConnectionModalOpen; }],
+    ['#search-scan-modal', function () { return scanModalOpen(); }],
+    ['#account-country-modal', function () { return accountCountryModalOpen; }],
+    ['#account-keypad-modal', function () { return accountKeypadOpen(); }],
+    ['#support-modal', function () { return supportModalOpen; }],
+    ['#rank-filter-modal', function () { return rankFilterOpen; }],
+    ['#actor-works-modal', function () { return typeof actorWorksOpen !== 'undefined' && actorWorksOpen; }],
+    ['#detail-cast-modal', function () { return detailCastOpen; }],
+    ['#confirm-modal', function () { return confirmOpen; }],
+    ['#playback-command-menu', function () { return typeof playbackCommandMenuOpen !== 'undefined' && playbackCommandMenuOpen; }],
+    ['#player-options', function () { return playerOptionsOpen; }],
+    ['#discussion-panel', function () { return discussionOpen; }],
+    ['#end-recommendations', function () { return !!(endRecommendations && endRecommendations.isOpen()); }]
+  ];
+  function activeModalRoot() {
+    for (var i = 0; i < modalLayers.length; i++) if (modalLayers[i][1]()) return modalLayers[i][0];
+    return '';
+  }
+
   function focusables(selector) {
+    var query = selector || allZonesQuery || (allZonesQuery = Object.keys(zoneSelectors).map(function (zone) { return zoneSelectors[zone]; }).join(','));
+    var frame = focusables.frame;
+    if (frame && frame[query]) return frame[query].slice();
     var result = [];
-    var query = selector || Object.keys(zoneSelectors).map(function (zone) { return zoneSelectors[zone]; }).join(',');
+    var root = activeModalRoot();
     Array.prototype.forEach.call(document.querySelectorAll(query), function (element) {
+      if (root) { if (!element.closest(root)) return; }
+      else if (element.closest('#playback-command-menu, #end-recommendations, #discussion-panel')) return;
+      else if (detailModalOpen !== !!element.closest('#detail-modal')) return;
+      if (element.disabled || !element.getClientRects || !element.getClientRects().length) return;
       var style = window.getComputedStyle(element);
-      var insideModal = element.closest && element.closest('#detail-modal');
-      if (coreConnectionModalOpen) { if (!element.closest('#core-connection-modal')) return; }
-      else if (scanModalOpen()) { if (!element.closest('#search-scan-modal')) return; }
-      else if (accountCountryModalOpen) { if (!element.closest('#account-country-modal')) return; }
-      else if (accountKeypadOpen()) { if (!element.closest('#account-keypad-modal')) return; }
-      else if (supportModalOpen) { if (!element.closest('#support-modal')) return; }
-      else if (rankFilterOpen) { if (!element.closest('#rank-filter-modal')) return; }
-      else if (typeof actorWorksOpen !== 'undefined' && actorWorksOpen) { if (!element.closest('#actor-works-modal')) return; }
-      else if (detailCastOpen) { if (!element.closest('#detail-cast-modal')) return; }
-      else if (confirmOpen) { if (!element.closest('#confirm-modal')) return; }
-      else if (typeof playbackCommandMenuOpen !== 'undefined' && playbackCommandMenuOpen) { if (!element.closest('#playback-command-menu')) return; }
-      else if (playerOptionsOpen) { if (!element.closest('#player-options')) return; }
-      else if (discussionOpen) { if (!element.closest('#discussion-panel')) return; }
-      else if (endRecommendations && endRecommendations.isOpen()) { if (!element.closest('#end-recommendations')) return; }
-      else if (element.closest('#playback-command-menu')) return;
-      else if (element.closest('#end-recommendations')) return;
-      else if (element.closest('#discussion-panel')) return;
-      else if (detailModalOpen ? !insideModal : insideModal) return;
-      if (!element.getClientRects || !element.getClientRects().length) return;
-      if (!element.disabled && style.display !== 'none' && style.visibility !== 'hidden') result.push(element);
+      if (style.display !== 'none' && style.visibility !== 'hidden') result.push(element);
     });
+    if (frame) frame[query] = result.slice();
     return result;
   }
 
@@ -1075,8 +1103,13 @@
     return null;
   }
 
+  var paintedFocus = null;
   function paintFocus(element) {
-    document.querySelectorAll('.is-focused').forEach(function (node) { node.classList.remove('is-focused'); });
+    // Only this function paints focus, so the previous node is known; fall
+    // back to a full scan when it was replaced or never recorded.
+    if (paintedFocus && paintedFocus !== element && document.contains(paintedFocus)) paintedFocus.classList.remove('is-focused');
+    else if (!paintedFocus || !document.contains(paintedFocus)) document.querySelectorAll('.is-focused').forEach(function (node) { if (node !== element) node.classList.remove('is-focused'); });
+    paintedFocus = element || null;
     if (element) element.classList.add('is-focused');
   }
 
@@ -1161,6 +1194,7 @@
     if (element.classList.contains('locale-action')) return 'localeActions';
     if (element.classList.contains('recommendation-direction-action')) return 'recommendationDirection';
     if (element.classList.contains('sidebar-display-action')) return 'sidebarDisplay';
+    if (element.classList.contains('startup-page-action')) return 'startupPage';
     if (element.classList.contains('auto-cinema-action')) return 'autoCinema';
     if (element.classList.contains('webos-audio-action')) return 'webosAudio';
     if (element.classList.contains('portrait-background-action')) return 'portraitBackground';
@@ -1680,12 +1714,18 @@
     if (zone === 'sidebarDisplay') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
       if (direction === 'up') return activeSidebar();
+      if (direction === 'down') return firstVisible('.startup-page-action[aria-pressed="true"]') || firstVisible('.startup-page-action') || firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action');
+      return null;
+    }
+    if (zone === 'startupPage') {
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
+      if (direction === 'up') return selectedSidebarDisplay() || activeSidebar();
       if (direction === 'down') return firstVisible('.locale-action[aria-pressed="true"]') || firstVisible('.locale-action') || firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.app-update-action');
       return null;
     }
     if (zone === 'localeActions') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return selectedSidebarDisplay() || activeSidebar();
+      if (direction === 'up') return firstVisible('.startup-page-action[aria-pressed="true"]') || firstVisible('.startup-page-action') || selectedSidebarDisplay() || activeSidebar();
       if (direction === 'down') return firstVisible('.recommendation-direction-action[aria-pressed="true"]') || firstVisible('.recommendation-direction-action') || firstVisible('.auto-cinema-action') || firstVisible('.webos-audio-action') || firstVisible('.portrait-background-action[aria-pressed="true"]') || firstVisible('.portrait-background-action') || firstVisible('.episode-prefetch-action[aria-pressed="true"]') || firstVisible('.episode-prefetch-action') || firstVisible('.playback-mode-action[aria-pressed="true"]') || firstVisible('.playback-mode-action') || firstVisible('.app-update-action');
       return null;
     }
@@ -2022,8 +2062,24 @@
     return key;
   }
 
+  // One remote key press can query the same selectors many times while the
+  // DOM is unchanged; moveFrom reads them through this per-press cache.
+  function withFocusFrame(work) {
+    if (focusables.frame) return work();
+    focusables.frame = {};
+    try { return work(); } finally { focusables.frame = null; }
+  }
+
+  function overlayOpen() {
+    return detailModalOpen || playerOptionsOpen || confirmOpen || discussionOpen;
+  }
+
   function handleKey(event) {
     var key = normalizedKey(event);
+    if (searchSuggestionActivation && (key === 'Enter' || key === 'Escape')) {
+      if (key === 'Escape') handleBack();
+      event.preventDefault(); event.stopPropagation(); return;
+    }
     if (handleEndRecommendationKey(key, !!event.repeat)) { event.preventDefault(); event.stopPropagation(); return; }
     if (accountKeypadOpen()) {
       numericKeypad.handleKey(key, !!event.repeat);
@@ -2106,27 +2162,27 @@
       return;
     }
     if (!direction) return;
-    if (!detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen && current && current.id === 'control-progress') {
+    if (!overlayOpen() && current && current.id === 'control-progress') {
       if (direction === 'left' || direction === 'right') seekBy(direction === 'left' ? -10 : 10);
       else goFocus(direction === 'up' ? document.getElementById('hero-feed-focus') : lastPlaybackControl || firstVisible('.playback-buttons .control-button'));
       event.preventDefault(); event.stopPropagation(); return;
     }
-    if (!detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen && pageMode() === 'recommend' && zoneOf(current) === 'feed' &&
+    if (!overlayOpen() && pageMode() === 'recommend' && zoneOf(current) === 'feed' &&
       shell.classList.contains('is-cinema') && (direction === 'up' || direction === 'down')) {
       if (!event.repeat) switchPlayerEpisode(direction === 'up' ? -1 : 1);
       event.preventDefault(); event.stopPropagation(); return;
     }
-    if (!detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen && pageMode() === 'recommend' && zoneOf(current) === 'feed' && (direction === 'up' || direction === 'down')) {
+    if (!overlayOpen() && pageMode() === 'recommend' && zoneOf(current) === 'feed' && (direction === 'up' || direction === 'down')) {
       if (!event.repeat) switchRecommendation(direction === 'up' ? -1 : 1);
       event.preventDefault();
       event.stopPropagation();
       return;
     }
-    if (!detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen && zoneOf(current) === 'feed' && pageMode() === 'player' && (direction === 'up' || direction === 'down')) {
+    if (!overlayOpen() && zoneOf(current) === 'feed' && pageMode() === 'player' && (direction === 'up' || direction === 'down')) {
       if (!event.repeat) switchPlayerEpisode(direction === 'up' ? -1 : 1);
       event.preventDefault(); event.stopPropagation(); return;
     }
-    if (!detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen &&
+    if (!overlayOpen() &&
       (pageMode() === 'player' || pageMode() === 'recommend' && shell.classList.contains('is-cinema')) &&
       zoneOf(current) === 'feed' && (direction === 'left' || direction === 'right') &&
       (shell.classList.contains('is-cinema') || shell.classList.contains('is-controls-hidden'))) {
@@ -2134,8 +2190,8 @@
       if (!seeked) showNotice(uiText('ui.videoReadySeek', '视频准备好后才能快进或后退'));
       event.preventDefault(); event.stopPropagation(); return;
     }
-    if (isPlaybackPage() && !detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen && (direction !== 'left' || shell.classList.contains('is-cinema') || zoneOf(current) !== 'feed')) revealControls();
-    var target = moveFrom(current, direction);
+    if (isPlaybackPage() && !overlayOpen() && (direction !== 'left' || shell.classList.contains('is-cinema') || zoneOf(current) !== 'feed')) revealControls();
+    var target = withFocusFrame(function () { return moveFrom(current, direction); });
     if (target) {
       goFocus(target);
     }
@@ -2454,6 +2510,9 @@
   }
   function revealControls() {
     controlsManuallyHidden = false;
+    // Hidden progress ticks skip painting the controls. Sync before revealing
+    // them, without refreshing on every pointer move while already visible.
+    if (shell.classList.contains('is-controls-hidden')) updatePlaybackControls();
     shell.classList.remove('is-controls-hidden');
     scheduleControlsHide();
   }
@@ -2466,7 +2525,7 @@
   function clearPrefetchedEpisodeHint() {
     if (prefetchedEpisodeHint) clearTimeout(prefetchedEpisodeHint.timer);
     prefetchedEpisodeHint = null;
-    document.getElementById('hero').classList.remove('is-prefetched-episode-quiet');
+    document.getElementById('hero').classList.remove('is-prefetched-episode-quiet', 'is-prefetched-episode-text-only');
   }
   function beginPrefetchedEpisodeHint(item, episode, generation, startedAt, sourceGeneration) {
     clearPrefetchedEpisodeHint();
@@ -2484,20 +2543,26 @@
       started_at: startedAt, revealed: Date.now() - startedAt >= 800, timer: null };
     prefetchedEpisodeHint = hint;
     var hero = document.getElementById('hero');
-    hero.classList.toggle('is-prefetched-episode-quiet', !hint.revealed);
-    if (hint.revealed) { hero.classList.add('is-range-transition-loading'); return; }
-    hint.timer = setTimeout(function () {
+    function updateHint() {
       if (prefetchedEpisodeHint !== hint) return;
       if (hint.generation !== feedGeneration || hint.owner !== accountEpoch || applicationInBackground || applicationHidden() || !isPlaybackPage()) {
         clearPrefetchedEpisodeHint(); return;
       }
-      hint.revealed = true;
-      hero.classList.remove('is-prefetched-episode-quiet');
-      // The normal 320ms Range hint must not hide this longer deadline,
-      // including when natural continuation spent time reading details.
-      hero.classList.add('is-range-transition-loading');
-      setPlayerStatus(uiText('ui.preparingPlayback', '正在准备播放…'));
-    }, Math.max(0, 800 - (Date.now() - startedAt)));
+      var elapsed = Math.max(0, Date.now() - hint.started_at);
+      hint.revealed = elapsed >= 800;
+      hero.classList.toggle('is-prefetched-episode-quiet', !hint.revealed);
+      hero.classList.toggle('is-prefetched-episode-text-only', elapsed < 3000);
+      if (hint.revealed) {
+        // Keep the original switch deadline through natural continuation.
+        // Show the target episode first, and a spinner only after 3 seconds.
+        hero.classList.add('is-range-transition-loading');
+        setPlayerStatus(episodeLoadingText(hint.episode));
+      }
+      if (prefetchedEpisodeHint === hint && elapsed < 3000) {
+        hint.timer = setTimeout(updateHint, (hint.revealed ? 3000 : 800) - elapsed);
+      }
+    }
+    updateHint();
   }
   function setPlayerStatus(message, failed) {
     var panel = document.getElementById('player-status');
@@ -2507,7 +2572,7 @@
     var preparing = hero.classList.contains('is-preparing-video') || activePlayback && (activePlayback.continuationPending || !activePlayback.started);
     if (prefetchedEpisodeHint) {
       if (failed || !message || !preparing || prefetchedEpisodeHint.generation !== feedGeneration || prefetchedEpisodeHint.owner !== accountEpoch) clearPrefetchedEpisodeHint();
-      else message = uiText('ui.preparingPlayback', '正在准备播放…');
+      else message = episodeLoadingText(prefetchedEpisodeHint.episode);
     }
     var transition = !!(message && !failed && preparing);
     if (failed) { clearEpisodeCover(); if (portraitBackdrop) portraitBackdrop.reset(); }
@@ -2558,7 +2623,7 @@
     var button = document.querySelector('[data-action="' + action + '"]');
     var text = button.querySelector('.control-label');
     if (text.textContent !== label) text.textContent = label;
-    button.setAttribute('aria-label', label);
+    if (button.getAttribute('aria-label') !== label) button.setAttribute('aria-label', label);
     var use = button.querySelector('use');
     if (use.getAttribute('href') !== '#' + icon) {
       use.setAttribute('href', '#' + icon);
@@ -2574,12 +2639,17 @@
     var duration = Number.isFinite(video.duration) ? video.duration : 0;
     var position = Math.min(duration, Number(video.currentTime) || 0);
     var progress = document.getElementById('control-progress');
-    document.querySelector('.time-label').textContent = clockText(position) + ' / ' + clockText(duration);
-    progress.disabled = !duration;
-    progress.setAttribute('aria-valuemax', String(Math.floor(duration)));
-    progress.setAttribute('aria-valuenow', String(Math.floor(position)));
-    progress.setAttribute('aria-valuetext', clockText(position) + ' / ' + clockText(duration));
-    progress.querySelector('span').style.width = (duration ? position / duration * 100 : 0) + '%';
+    var timeText = clockText(position) + ' / ' + clockText(duration);
+    var timeLabel = document.querySelector('.time-label');
+    if (timeLabel.textContent !== timeText) timeLabel.textContent = timeText;
+    if (progress.disabled !== !duration) progress.disabled = !duration;
+    var max = String(Math.floor(duration)), now = String(Math.floor(position));
+    if (progress.getAttribute('aria-valuemax') !== max) progress.setAttribute('aria-valuemax', max);
+    if (progress.getAttribute('aria-valuenow') !== now) progress.setAttribute('aria-valuenow', now);
+    if (progress.getAttribute('aria-valuetext') !== timeText) progress.setAttribute('aria-valuetext', timeText);
+    var fill = progress.querySelector('span');
+    var width = (duration ? position / duration * 100 : 0) + '%';
+    if (fill.style.width !== width) fill.style.width = width;
     var paused = video.paused || video.ended;
     setControlIcon('pause', paused ? uiText('ui.play', '播放') : uiText('ui.pause', '暂停'), paused ? 'icon-play' : 'icon-pause');
     var speedLabel = video.playbackRate + 'x';
@@ -2590,13 +2660,13 @@
     var speedButton = document.querySelector('[data-action="speed"]');
     if (speedButton) {
       var speedHidden = !playbackSpeedAvailable();
-      speedButton.classList.toggle('is-hidden', speedHidden);
+      if (speedButton.classList.contains('is-hidden') !== speedHidden) speedButton.classList.toggle('is-hidden', speedHidden);
       if (speedHidden) {
-        speedButton.tabIndex = -1;
-        speedButton.setAttribute('aria-hidden', 'true');
+        if (speedButton.getAttribute('tabindex') !== '-1') speedButton.tabIndex = -1;
+        if (speedButton.getAttribute('aria-hidden') !== 'true') speedButton.setAttribute('aria-hidden', 'true');
       } else {
-        speedButton.removeAttribute('aria-hidden');
-        speedButton.removeAttribute('tabindex');
+        if (speedButton.hasAttribute('aria-hidden')) speedButton.removeAttribute('aria-hidden');
+        if (speedButton.hasAttribute('tabindex')) speedButton.removeAttribute('tabindex');
       }
     }
     setControlIcon('speed', speedLabel, 'icon-speed');
@@ -3067,6 +3137,7 @@
     if (autoCinemaCandidate) cancelPendingAutoCinema();
     if (endRecommendations && endRecommendations.close(true)) return true;
     if (searchSuggestionOpen) { closeSearchSuggestions(true); return true; }
+    if (searchSuggestionActivation) { closeSearchSuggestions(true); return true; }
     if (searchScanOpen) { closeSearchScan(true); return true; }
     if (typeof danmakuScanOpen !== 'undefined' && danmakuScanOpen) { closeDanmakuScan(true); return true; }
     if (accountCountryModalOpen) { closeAccountCountryModal(false); return true; }
@@ -3110,6 +3181,7 @@
     return true;
   }
   function pauseForBackground() {
+    cancelSearchSuggestionActivation();
     if (accountQR && accountQR.snapshot().active) cancelAccountQR(false);
     if (typeof closePlaybackCommandMenu === 'function') closePlaybackCommandMenu(false);
     if (typeof closePlaybackMenuHint === 'function') closePlaybackMenuHint();
@@ -5722,6 +5794,7 @@
   }
 
   function closeSearchSuggestions(restoreInput) {
+    cancelSearchSuggestionActivation();
     clearTimeout(searchSuggestionTimer);
     searchSuggestionTimer = null;
     if (searchSuggestionRequest && searchSuggestionRequest.abort) searchSuggestionRequest.abort();
@@ -5730,6 +5803,9 @@
     searchSuggestionOpen = false;
     searchSuggestionFocusedKey = '';
     if (searchSuggestions) {
+      if (document.activeElement && searchSuggestions.contains(document.activeElement)) {
+        try { document.activeElement.blur(); } catch (ignored) {}
+      }
       searchSuggestions.classList.add('is-hidden');
       searchSuggestions.setAttribute('aria-hidden', 'true');
     }
@@ -5845,6 +5921,7 @@
   }
 
   function scheduleSearchSuggestions() {
+    cancelSearchSuggestionActivation();
     if (!searchInput || pageMode() !== 'search') return;
     searchSuggestionReturnKey = '';
     clearTimeout(searchSuggestionTimer);
@@ -5855,23 +5932,56 @@
     searchSuggestionTimer = setTimeout(function () { loadSearchSuggestions(query); }, 240);
   }
 
+  function cancelSearchSuggestionActivation() {
+    var pending = searchSuggestionActivation;
+    if (!pending) return;
+    searchSuggestionActivation = null;
+    if (pending.frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pending.frame);
+    clearTimeout(pending.timer);
+    searchSuggestionReturnKey = '';
+  }
+
   function activateSearchSuggestion(item, button) {
-    if (!item) return;
+    if (!item || searchSuggestionActivation || pageMode() !== 'search') return;
+    if (button && typeof button.blur === 'function') {
+      try { button.blur(); } catch (ignored) {}
+    }
+    closeSearchSuggestions(false);
     searchSuggestionReturnKey = button && button.dataset.suggestionKey || item.key || item.name;
     var returnFocus = searchInput;
-    closeSearchSuggestions(false);
-    if (item.kind === 'short_play_actor' && item.actor_id) {
-      openActorWorks({ actor_id: item.actor_id, title: item.name }, false, returnFocus);
-      return;
+    var pending = { frame: null, timer: null, generation: searchSuggestionGeneration,
+      query: searchInput.value, owner: accountEpoch };
+    searchSuggestionActivation = pending;
+    function activate() {
+      if (searchSuggestionActivation !== pending) return;
+      searchSuggestionActivation = null;
+      if (pending.generation !== searchSuggestionGeneration || pending.query !== searchInput.value ||
+          pending.owner !== accountEpoch || pageMode() !== 'search' || applicationInBackground || applicationHidden() ||
+          detailModalOpen || actorWorksOpen || searchScanOpen) {
+        searchSuggestionReturnKey = '';
+        return;
+      }
+      if (item.kind === 'short_play_actor' && item.actor_id) {
+        openActorWorks({ actor_id: item.actor_id, title: item.name }, false, returnFocus);
+      } else if (item.drama && item.drama.series_id) {
+        openDetail(item.drama, undefined, returnFocus);
+      } else {
+        searchInput.value = item.name || searchInput.value;
+        searchSuggestionReturnKey = '';
+        goFocus(searchInput);
+        submitSearch();
+      }
     }
-    if (item.drama && item.drama.series_id) {
-      openDetail(item.drama, undefined, returnFocus);
-      return;
+    // Chromium 83 TV builds can crash when hiding the suggestion overlay and
+    // creating a modal in the same render commit. Allow a paint between them.
+    if (typeof requestAnimationFrame === 'function') {
+      pending.frame = requestAnimationFrame(function () {
+        if (searchSuggestionActivation !== pending) return;
+        pending.frame = requestAnimationFrame(activate);
+      });
+    } else {
+      pending.timer = setTimeout(activate, 80);
     }
-    searchInput.value = item.name || searchInput.value;
-    searchSuggestionReturnKey = '';
-    goFocus(searchInput);
-    submitSearch();
   }
 
   function lastSearchFilter() {
@@ -7563,6 +7673,7 @@
   }
 
   function activatePage(item, restoring) {
+    cancelSearchSuggestionActivation();
     if (portraitBackdrop) portraitBackdrop.reset();
     if (accountQR && accountQR.snapshot().active && item.dataset.page !== 'account') cancelAccountQR(false);
     if (item.dataset.page === 'recommend' && pageMode() === 'recommend') {
@@ -7770,6 +7881,14 @@
         playbackCommandMenuReturnFocus = menuReturn;
         openDetail(featuredItem, item.dataset.action === 'player-menu-seasons' ? 'series' : undefined, menuReturn);
       }
+      else if (item.dataset.action === 'more') {
+        if (!openPlaybackCommandMenu()) showNotice(uiText('player.moreAfterPlay', '开始播放后可使用更多选项'));
+      }
+      else if (item.dataset.action === 'player-menu-speed' || item.dataset.action === 'player-menu-diagnostics') {
+        var optionsReturn = playbackCommandMenuReturnFocus || document.getElementById('hero-feed-focus');
+        closePlaybackCommandMenu(false);
+        openPlayerOptions(item.dataset.action === 'player-menu-speed' ? 'speed' : 'diagnostics', optionsReturn);
+      }
       else if (item.dataset.action === 'player-menu-fullscreen') {
         closePlaybackCommandMenu(true);
         toggleCinema();
@@ -7958,10 +8077,7 @@
     window.HongguoPlaybackPointer.attach(document.getElementById('hero'), {
       isEnabled: function () {
         return isPlaybackPage() && !!activePlayback && !applicationInBackground && !applicationHidden() &&
-          !detailModalOpen && !playerOptionsOpen && !confirmOpen && !discussionOpen &&
-          !scanModalOpen() && !supportModalOpen && !accountCountryModalOpen && !accountKeypadOpen() &&
-          !rankFilterOpen && !detailCastOpen && !actorWorksOpen && !playbackCommandMenuOpen &&
-          !(endRecommendations && endRecommendations.isOpen());
+          !detailModalOpen && !activeModalRoot();
       },
       onTogglePlayback: toggleVideo,
       onSeek: function (delta) { seekBy(delta, false); },
@@ -8220,7 +8336,7 @@
     tickDanmaku();
     checkPlaybackProgress(media);
     if (!activePlayback || !activePlayback.started) return;
-    updatePlaybackControls();
+    if (!shell.classList.contains('is-controls-hidden')) updatePlaybackControls();
     maybePrefetchNextEpisode(media);
     saveProgress(false);
   });
@@ -8483,6 +8599,11 @@
       if (!sidebarSettings.choose(button.getAttribute('data-mode'))) showNotice(uiText('settings.saveFailed', '设置未能保存，请重试。'));
     });
   });
+  document.querySelectorAll('.startup-page-action').forEach(function (button) {
+    button.addEventListener('click', function () {
+      if (!startupPageSettings.choose(button.getAttribute('data-page'))) showNotice(uiText('settings.saveFailed', '设置未能保存，请重试。'));
+    });
+  });
   renderLocaleSettings();
   document.querySelectorAll('.locale-action').forEach(function (button) {
     button.addEventListener('click', function () {
@@ -8713,6 +8834,24 @@
       });
     });
   }
+  function openStartupPage() {
+    var initialHomeProgram = null;
+    try {
+      if (window.HongguoTVHome && window.HongguoTVHome.consumeHomeProgram) {
+        var pendingHomeProgram = window.HongguoTVHome.consumeHomeProgram();
+        if (pendingHomeProgram) initialHomeProgram = JSON.parse(pendingHomeProgram);
+      }
+    } catch (error) { initialHomeProgram = null; }
+    if (initialHomeProgram && window.HongguoTV.openHomeProgram(initialHomeProgram)) return;
+    var page = startupPageSettings.page();
+    var target = page !== 'recommend' && document.querySelector('.side-item[data-page="' + page + '"]');
+    if (target) {
+      activatePage(target);
+      goFocus(activeSidebar());
+    } else {
+      loadCatalog(uiText('nav.recommend', '推荐'));
+    }
+  }
   updateWebOSAudioSettings();
   initRecommendationDirectionSettings();
   if (webosAudio && webosAudio.supported) {
@@ -8739,12 +8878,5 @@
   libraryReady = loadLibrary();
   pollAccount();
   accountPollTimer = setInterval(function () { if (!applicationHidden()) pollAccount(); }, 8000);
-    var initialHomeProgram = null;
-    try {
-      if (window.HongguoTVHome && window.HongguoTVHome.consumeHomeProgram) {
-        var pendingHomeProgram = window.HongguoTVHome.consumeHomeProgram();
-        if (pendingHomeProgram) initialHomeProgram = JSON.parse(pendingHomeProgram);
-      }
-    } catch (error) { initialHomeProgram = null; }
-    if (!initialHomeProgram || !window.HongguoTV.openHomeProgram(initialHomeProgram)) loadCatalog(uiText('nav.recommend', '推荐'));
+  openStartupPage();
 }());

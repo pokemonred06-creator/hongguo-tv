@@ -2,6 +2,9 @@
   'use strict';
   root.HongguoLocales = root.HongguoLocales || {};
   root.HongguoLocales['ja-JP'] = {
+    'settings.startupPage': '起動ページ',
+    'settings.startupPageDescription': 'アプリ起動時に表示するページを選びます。バックグラウンドから戻るときは元のページを維持します。',
+    'settings.startupPageCurrent': '次回の起動：{page}',
   "settings.portraitBackground": "縦動画の背景",
   "settings.portraitBackgroundDescription": "黒、または再生中の映像をぼかして表示します。処理負荷が増えるため、非対応または処理が遅い端末では黒帯を維持します。",
   "settings.portraitBackgroundBlack": "黒",
@@ -209,6 +212,9 @@
   "hero.currentDrama": "現在のおすすめドラマ",
   "hero.loadingRecommendations": "おすすめを読み込み中",
   "hero.switchHint": "↑↓ 切り替え",
+  "hero.navHint": "戻る メニュー表示",
+  "player.more": "その他",
+  "player.moreAfterPlay": "再生開始後にその他の操作を使用できます",
   "hero.catalogContent": "カテゴリの作品",
   "hero.dramaList": "ドラマ一覧",
   "hero.videoActions": "動画操作",
