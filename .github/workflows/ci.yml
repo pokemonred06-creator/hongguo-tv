@@ -14,6 +14,14 @@ permissions:
   contents: read
 
 jobs:
+  release-source-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test release source guards on Windows
+        shell: bash
+        run: python3 -m unittest discover -s tests -p test_release_source.py
+
   build:
     if: github.event_name != 'workflow_dispatch' || inputs.core_preview == ''
     runs-on: ubuntu-latest
@@ -59,6 +67,7 @@ jobs:
           node --check core/cmd/hongguotv/ui/playback-diagnostics.js
           node --check core/cmd/hongguotv/ui/playback-settings.js
           node --check core/cmd/hongguotv/ui/sidebar-settings.js
+          node --check core/cmd/hongguotv/ui/startup-page.js
           node --check core/cmd/hongguotv/ui/auto-cinema.js
           node --check core/cmd/hongguotv/ui/compat.js
           node --check core/cmd/hongguotv/ui/episode-prefetch.js
@@ -86,6 +95,8 @@ jobs:
           python3 scripts/package_mpv_sources.py --out "$RUNNER_TEMP/hongguo-tv-mpv-library-source-$APP_VERSION.zip"
       # Keep flavor packaging in separate Gradle invocations; AGP's native
       # library splitter can race when both APK variants package together.
+      - name: Verify standard and MPV dependency isolation
+        run: gradle --no-daemon --max-workers=1 -p android :app:verifyPlayerDependencyIsolation
       - name: Build and lint standard debug APK
         run: gradle --no-daemon --max-workers=1 -p android testStandardDebugUnitTest assembleStandardDebug lintStandardDebug
       - name: Build and lint MPV debug APK

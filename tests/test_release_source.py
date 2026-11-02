@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -80,6 +81,43 @@ class ReleaseSourceTests(unittest.TestCase):
         git(self.clone, "checkout", "--detach", feature_sha)
         with self.assertRaisesRegex(ValueError, "not an ancestor of origin/main"):
             verify("push", "refs/tags/v1.2.4", feature_sha)
+
+    def test_desktop_reads_annotated_remote_tag_without_replacing_checkout_tag(self):
+        git(self.seed, "tag", "-a", "v1.2.6", "-m", "release", self.main_sha)
+        git(self.seed, "push", "origin", "v1.2.6")
+        remote_tag = git(self.seed, "rev-parse", "refs/tags/v1.2.6")
+        # actions/checkout can represent the remote annotated tag locally by
+        # its commit. Fetching back into the same tag would reject clobbering.
+        git(self.clone, "tag", "v1.2.6", self.main_sha)
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/desktop.yml").read_text(encoding="utf-8")
+        commands = workflow.split('          git fetch --no-tags origin "refs/tags/v$APP_VERSION"', 1)[1]
+        commands = 'git fetch --no-tags origin "refs/tags/v$APP_VERSION"' + commands.split('          if [[ "${GITHUB_REF_TYPE:-}"', 1)[0]
+        # Python's Windows PATH may resolve bash to the WSL launcher even
+        # though Actions runs the surrounding step with Git for Windows Bash.
+        bash = "bash"
+        if os.name == "nt":
+            git_executable = Path(shutil.which("git"))
+            bash = next(str(parent / "bin/bash.exe") for parent in git_executable.parents
+                        if (parent / "bin/bash.exe").is_file())
+        result = subprocess.run([bash, "-e", "-c", commands], cwd=self.clone,
+                                env={**os.environ, "APP_VERSION": "1.2.6", "GITHUB_SHA": self.main_sha},
+                                text=True, capture_output=True)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(self.main_sha, git(self.clone, "rev-parse", "refs/tags/v1.2.6"))
+        self.assertEqual(remote_tag, git(self.remote, "rev-parse", "refs/tags/v1.2.6"))
+        wrong = subprocess.run([bash, "-e", "-c", commands], cwd=self.clone,
+                               env={**os.environ, "APP_VERSION": "1.2.6", "GITHUB_SHA": "0" * 40},
+                               text=True, capture_output=True)
+        self.assertNotEqual(0, wrong.returncode)
+        (self.clone / "core").mkdir()
+        (self.clone / "core/playback.txt").write_text("different application source\n")
+        git(self.clone, "add", "core/playback.txt")
+        git(self.clone, "commit", "-m", "application differs from release")
+        changed = subprocess.run([bash, "-e", "-c", commands], cwd=self.clone,
+                                 env={**os.environ, "APP_VERSION": "1.2.6",
+                                      "GITHUB_SHA": git(self.clone, "rev-parse", "HEAD")},
+                                 text=True, capture_output=True)
+        self.assertNotEqual(0, changed.returncode)
 
 
 if __name__ == "__main__":
