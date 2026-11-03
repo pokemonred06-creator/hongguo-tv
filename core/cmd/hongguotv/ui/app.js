@@ -5803,7 +5803,7 @@
     searchSuggestionOpen = false;
     searchSuggestionFocusedKey = '';
     if (searchSuggestions) {
-      if (document.activeElement && searchSuggestions.contains(document.activeElement)) {
+      if (typeof document !== 'undefined' && document && document.activeElement && searchSuggestions.contains && searchSuggestions.contains(document.activeElement)) {
         try { document.activeElement.blur(); } catch (ignored) {}
       }
       searchSuggestions.classList.add('is-hidden');
