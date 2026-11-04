@@ -40,6 +40,8 @@ const (
 	miniReelMaxJSONBytes       = 5 * 1024 * 1024
 	miniReelAPIBase            = "https://api5-normal-lq.fqnovel.com"
 	miniReelAPIPath            = "/novel/player/multi_video_model/v1/"
+	miniReelVideoTabBase       = "https://api5-normal-sinfonlineb.fqnovel.com"
+	miniReelVideoTabPath       = "/reading/bookapi/video_tab/multi_video_model/v1/"
 	miniReelAppUA              = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 	miniReelPlaybackUA         = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
 	miniReelFallbackUA         = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
@@ -54,8 +56,13 @@ const (
 	miniReelIdentityRefreshGap = 10 * time.Minute
 	miniReelIdentityCandidates = 4
 	miniReelIdentityConfirmGap = 2 * time.Second
-	miniReelCacheKeyVersion    = "v3"
-	miniReelDefaultContentType = "1004"
+	// A healthy primary should finish without registering another identity. The
+	// spare target is hedged only after this short delay, then all candidates
+	// share one bounded context so a winner cancels the losers.
+	miniReelPlaybackRaceDelay   = 150 * time.Millisecond
+	miniReelPlaybackRaceTimeout = 30 * time.Second
+	miniReelCacheKeyVersion     = "v3"
+	miniReelDefaultContentType  = "1004"
 )
 
 var miniReelDefinitionRE = regexp.MustCompile(`(?i)(\d{3,4})`)
@@ -137,6 +144,7 @@ type miniReelDevice struct {
 	deviceID  string
 	installID string
 	cdid      string
+	cookie    string
 }
 
 type miniReelPlaybackDeviceCache struct {
@@ -250,6 +258,21 @@ func (p *miniReelPlaybackDeviceRegistration) wait(ctx context.Context) (miniReel
 }
 
 var miniReelPlaybackIdentity = newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice)
+
+// A separate spare identity prevents one rejected anonymous identity from
+// making every route fail together. Both caches stay lazy on the fast path.
+var miniReelPlaybackSpareIdentity = newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice)
+
+// Keep route identities independent: the upstream can return HTTP 200 with an
+// empty model for one host/device pair while another host accepts the request.
+var miniReelPlaybackRouteIdentities = []*miniReelPlaybackDeviceCache{
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+	newMiniReelPlaybackDeviceCache(registerMiniReelPlaybackDevice),
+}
 
 func handleMiniReelResolve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -894,14 +917,344 @@ func miniReelNativeOptionsEndpointModeForContentType(ctx context.Context, vid, e
 	if err != nil {
 		return nil, err
 	}
-	options, err := miniReelNativeOptionsWithIdentityCacheForContentType(ctx, vid, endpoint, codecMode, contentType, miniReelPlaybackIdentity)
+	var options []miniReelOption
+	if miniReelIsProductionPlaybackEndpoint(endpoint) {
+		// The current official client uses video_tab GET as its primary model
+		// source. Keep the old multi_video_model route race below as a bounded
+		// compatibility fallback for servers or devices that do not expose it.
+		routes := miniReelProductionPlaybackRoutes()
+		if len(routes) > 2 {
+			device, tabErr := routes[2].identity.get(ctx)
+			if tabErr == nil {
+				options, tabErr = miniReelVideoTabOptions(ctx, vid, miniReelVideoTabBase+miniReelVideoTabPath, device, codecMode)
+				if tabErr == nil && len(options) > 0 {
+					return options, nil
+				}
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+			}
+		}
+		options, err = miniReelNativeOptionsWithRouteTargetsForContentType(ctx, vid, codecMode, contentType, routes)
+	} else {
+		options, err = miniReelNativeOptionsWithIdentityRaceForContentType(ctx, vid, endpoint, codecMode, contentType, miniReelPlaybackIdentity, miniReelPlaybackSpareIdentity)
+	}
 	if errors.Is(err, errMiniReelNoCompatibleSource) {
 		// Preserve the established caller contract: an otherwise valid response
 		// with no source reaches prepareMiniReelMedia, which adds the codec-aware
 		// user-facing error.
 		return nil, nil
 	}
+	// A phone Red/Green Fruit device identity is an explicit last resort. Keep
+	// it out of the anonymous identity caches and out of every account API.
+	// Codec filtering and caller cancellation must still retain their original
+	// behavior, so only retryable model/transport failures reach this branch.
+	primaryErr := err
+	if err != nil && miniReelPlaybackTargetRetryable(err) {
+		if custom, ok := getPlaybackCustomDeviceForMiniReel(); ok {
+			customOptions, customErr := miniReelNativeOptionsWithCustomDeviceForContentType(ctx, vid, endpoint, custom, codecMode, contentType)
+			if customErr == nil && len(customOptions) > 0 {
+				log.Printf("[minireel] playback recovered with configured phone device")
+				return customOptions, nil
+			}
+			// Keep the default identity's diagnostic. A configured device is a
+			// fallback aid, not a reason to replace VIDEO_MODEL_EMPTY with a
+			// less useful secondary error.
+			return nil, primaryErr
+		}
+	}
 	return options, err
+}
+
+func getPlaybackCustomDeviceForMiniReel() (miniReelDevice, bool) {
+	value := getPlaybackCustomDevice()
+	if value.DID == "" {
+		return miniReelDevice{}, false
+	}
+	return miniReelDevice{deviceID: value.DID, installID: value.UID}, true
+}
+
+func miniReelNativeOptionsWithCustomDeviceForContentType(ctx context.Context, vid, endpoint string, device miniReelDevice, codecMode, contentType string) ([]miniReelOption, error) {
+	routes := []string{endpoint}
+	if miniReelIsProductionPlaybackEndpoint(endpoint) {
+		routes = make([]string, 0, len(miniReelProductionPlaybackRoutes()))
+		for _, route := range miniReelProductionPlaybackRoutes() {
+			routes = append(routes, route.endpoint)
+		}
+	}
+	if len(routes) == 1 {
+		return miniReelNativeOptionsEndpointWithDeviceModeForContentType(ctx, vid, routes[0], device, codecMode, contentType)
+	}
+	races := make(chan struct {
+		options []miniReelOption
+		err     error
+	}, len(routes))
+	raceCtx, cancel := context.WithTimeout(ctx, miniReelPlaybackRaceTimeout)
+	defer cancel()
+	for _, route := range routes {
+		route := route
+		go func() {
+			options, err := miniReelNativeOptionsEndpointWithDeviceModeForContentType(raceCtx, vid, route, device, codecMode, contentType)
+			select {
+			case races <- struct {
+				options []miniReelOption
+				err     error
+			}{options: options, err: err}:
+			case <-raceCtx.Done():
+			}
+		}()
+	}
+	var lastErr error
+	for range routes {
+		select {
+		case result := <-races:
+			if result.err == nil && len(result.options) > 0 {
+				cancel()
+				return result.options, nil
+			}
+			if result.err != nil {
+				lastErr = result.err
+			}
+		case <-raceCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, raceCtx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errMiniReelVideoModelEmpty
+	}
+	return nil, lastErr
+}
+
+type miniReelPlaybackRouteTarget struct {
+	name     string
+	endpoint string
+	identity *miniReelPlaybackDeviceCache
+}
+
+// The player keeps a small explicit set of production hosts. This is a bounded
+// hedge, not an unbounded retry loop, and fixture/custom endpoints never use it.
+func miniReelProductionPlaybackRoutes() []miniReelPlaybackRouteTarget {
+	hosts := []string{
+		"api5-normal-sinfonlinea.fqnovel.com",
+		"api5-normal-sinfonlinec.fqnovel.com",
+		"api5-normal-sinfonlineb.fqnovel.com",
+		"api3-normal-sinfonlinea.fqnovel.com",
+		"api3-normal-sinfonlineb.fqnovel.com",
+		"api3-normal-sinfonlinec.fqnovel.com",
+	}
+	routes := make([]miniReelPlaybackRouteTarget, 0, len(hosts))
+	for i, host := range hosts {
+		routes = append(routes, miniReelPlaybackRouteTarget{
+			name: host, endpoint: "https://" + host + miniReelAPIPath,
+			identity: miniReelPlaybackRouteIdentities[i],
+		})
+	}
+	return routes
+}
+
+func miniReelIsProductionPlaybackEndpoint(endpoint string) bool {
+	return endpoint == miniReelAPIBase+miniReelAPIPath
+}
+
+func miniReelNativeOptionsWithRouteRace(ctx context.Context, vid, codecMode string) ([]miniReelOption, error) {
+	return miniReelNativeOptionsWithRouteRaceForContentType(ctx, vid, codecMode, miniReelDefaultContentType)
+}
+
+func miniReelNativeOptionsWithRouteRaceForContentType(ctx context.Context, vid, codecMode, contentType string) ([]miniReelOption, error) {
+	return miniReelNativeOptionsWithRouteTargetsForContentType(ctx, vid, codecMode, contentType, miniReelProductionPlaybackRoutes())
+}
+
+func miniReelNativeOptionsWithRouteTargets(ctx context.Context, vid, codecMode string, routes []miniReelPlaybackRouteTarget) ([]miniReelOption, error) {
+	return miniReelNativeOptionsWithRouteTargetsForContentType(ctx, vid, codecMode, miniReelDefaultContentType, routes)
+}
+
+func miniReelNativeOptionsWithRouteTargetsForContentType(ctx context.Context, vid, codecMode, contentType string, routes []miniReelPlaybackRouteTarget) ([]miniReelOption, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	codecMode, err := normalizeMiniReelCodecMode(codecMode)
+	if err != nil {
+		return nil, err
+	}
+	contentType, err = normalizeMiniReelContentType(contentType)
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, errMiniReelVideoModelEmpty
+	}
+	raceCtx, cancel := context.WithTimeout(ctx, miniReelPlaybackRaceTimeout)
+	defer cancel()
+	type result struct {
+		options []miniReelOption
+		err     error
+	}
+	results := make(chan result, len(routes))
+	for _, route := range routes {
+		route := route
+		go func() {
+			options, routeErr := miniReelNativeOptionsWithIdentityCacheForContentType(raceCtx, vid, route.endpoint, codecMode, contentType, route.identity)
+			if routeErr == nil && len(options) == 0 {
+				routeErr = errMiniReelNoCompatibleSource
+			}
+			select {
+			case results <- result{options: options, err: routeErr}:
+			case <-raceCtx.Done():
+			}
+		}()
+	}
+	var lastErr error
+	for range routes {
+		select {
+		case item := <-results:
+			if item.err == nil && len(item.options) > 0 {
+				cancel()
+				return item.options, nil
+			}
+			if item.err != nil {
+				lastErr = item.err
+			}
+		case <-raceCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, raceCtx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errMiniReelVideoModelEmpty
+	}
+	return nil, lastErr
+}
+
+// Resolve a custom endpoint against the cached primary and one independently
+// registered spare identity. The spare starts after a short hedge delay (or
+// immediately after a retryable primary failure), and is cancelled on success.
+func miniReelNativeOptionsWithIdentityRace(ctx context.Context, vid, endpoint, codecMode string, primary, spare *miniReelPlaybackDeviceCache) ([]miniReelOption, error) {
+	return miniReelNativeOptionsWithIdentityRaceForContentType(ctx, vid, endpoint, codecMode, miniReelDefaultContentType, primary, spare)
+}
+
+func miniReelNativeOptionsWithIdentityRaceForContentType(ctx context.Context, vid, endpoint, codecMode, contentType string, primary, spare *miniReelPlaybackDeviceCache) ([]miniReelOption, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	codecMode, err := normalizeMiniReelCodecMode(codecMode)
+	if err != nil {
+		return nil, err
+	}
+	contentType, err = normalizeMiniReelContentType(contentType)
+	if err != nil {
+		return nil, err
+	}
+	raceCtx, cancel := context.WithTimeout(ctx, miniReelPlaybackRaceTimeout)
+	defer cancel()
+	type targetResult struct {
+		name    string
+		options []miniReelOption
+		err     error
+	}
+	results := make(chan targetResult, 2)
+	start := func(name string, identity *miniReelPlaybackDeviceCache) {
+		go func() {
+			registrationStarted := time.Now()
+			device, targetErr := identity.get(raceCtx)
+			if targetErr != nil {
+				targetErr = finishPlaybackPreparation(targetErr, playbackPreparationDiagnostic{Code: "DEVICE_REGISTER_FAILED", Stage: "device_register"}, registrationStarted)
+			}
+			if targetErr == nil {
+				options, sourceErr := miniReelNativeOptionsEndpointWithDeviceModeForContentType(raceCtx, vid, endpoint, device, codecMode, contentType)
+				if sourceErr != nil {
+					targetErr = sourceErr
+				} else if len(options) == 0 {
+					targetErr = errMiniReelNoCompatibleSource
+				} else {
+					select {
+					case results <- targetResult{name: name, options: options}:
+					case <-raceCtx.Done():
+					}
+					return
+				}
+			}
+			select {
+			case results <- targetResult{name: name, err: targetErr}:
+			case <-raceCtx.Done():
+			}
+		}()
+	}
+	start("primary", primary)
+	spareStarted := false
+	var primaryErr, spareErr error
+	timer := time.NewTimer(miniReelPlaybackRaceDelay)
+	defer timer.Stop()
+	completed := 0
+	for completed < 2 {
+		select {
+		case result := <-results:
+			completed++
+			if result.err == nil && len(result.options) > 0 {
+				cancel()
+				return result.options, nil
+			}
+			if result.name == "primary" {
+				primaryErr = result.err
+				if result.err != nil && !miniReelPlaybackTargetRetryable(result.err) {
+					cancel()
+					return nil, result.err
+				}
+				if !spareStarted {
+					start("spare", spare)
+					spareStarted = true
+				}
+			} else {
+				spareErr = result.err
+			}
+		case <-timer.C:
+			if !spareStarted {
+				start("spare", spare)
+				spareStarted = true
+			}
+		case <-raceCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if primaryErr != nil {
+				return nil, primaryErr
+			}
+			if spareErr != nil {
+				return nil, spareErr
+			}
+			return nil, raceCtx.Err()
+		}
+	}
+	if primaryErr != nil {
+		return nil, primaryErr
+	}
+	return nil, spareErr
+}
+
+func miniReelPlaybackTargetRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errMiniReelStreamMiss) || errors.Is(err, errMiniReelVideoModelEmpty) || errors.Is(err, errMiniReelVideoModelMissing) || errors.Is(err, errMiniReelVideoListEmpty) {
+		return true
+	}
+	diagnostic := playbackPreparationDetails(err)
+	switch diagnostic.Code {
+	case "VIDEO_MODEL_TRANSPORT", "VIDEO_MODEL_HTTP", "VIDEO_MODEL_READ", "VIDEO_MODEL_EMPTY", "VIDEO_MODEL_MISSING", "VIDEO_MODEL_LIST_EMPTY", "VIDEO_MODEL_JSON", "FALLBACK_API_FAILED", "DEVICE_REGISTER_FAILED":
+		return true
+	default:
+		return false
+	}
 }
 
 func miniReelNativeOptionsWithIdentityCache(ctx context.Context, vid, endpoint, codecMode string, identity *miniReelPlaybackDeviceCache) ([]miniReelOption, error) {
@@ -952,7 +1305,38 @@ func registerMiniReelPlaybackDeviceAt(deviceBase string) (miniReelDevice, error)
 	if err := client.registerDevice(ctx); err != nil {
 		return miniReelDevice{}, err
 	}
-	return miniReelDevice{deviceID: client.session.DeviceID, installID: client.session.InstallID, cdid: device.CDID}, nil
+	return miniReelDevice{
+		deviceID:  client.session.DeviceID,
+		installID: client.session.InstallID,
+		cdid:      device.CDID,
+		cookie:    miniReelPlaybackCookieHeader(client.session.Cookies),
+	}, nil
+}
+
+// The video_tab request uses the small set of cookies returned by anonymous
+// device registration. Account cookies and tokens never enter this path.
+func miniReelPlaybackCookieHeader(values map[string]string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	allowed := map[string]bool{
+		"install_id":       true,
+		"ttreq":            true,
+		"store-region":     true,
+		"store-region-src": true,
+	}
+	keys := make([]string, 0, len(values))
+	for key, value := range values {
+		if allowed[key] && strings.TrimSpace(value) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+values[key])
+	}
+	return strings.Join(parts, "; ")
 }
 
 func miniReelNativeOptionsEndpointWithDevice(ctx context.Context, vid, endpoint string, device miniReelDevice) ([]miniReelOption, error) {
@@ -1038,7 +1422,10 @@ func miniReelNativeOptionsAttemptPolicyForContentType(ctx context.Context, vid, 
 		"version_name": {"7.1.3.32"}, "compliance_status": {"0"},
 	}
 	rawBody, _ := json.Marshal(map[string]any{
-		"biz_param":          map[string]any{"detail_page_version": 0, "device_level": 3, "disable_digg_stat": false, "need_all_video_definition": true, "need_mp4_align": false, "use_os_player": false, "use_server_dns": false, "video_platform": 1024},
+		// Keep the legacy fallback at the same conservative device level as the
+		// official video_tab request. Higher levels can replace otherwise
+		// playable low tiers with bytevc2 on TV-sized sources.
+		"biz_param":          map[string]any{"detail_page_version": 0, "device_level": 1, "disable_digg_stat": false, "need_all_video_definition": true, "need_mp4_align": false, "use_os_player": false, "use_server_dns": false, "video_platform": 1024},
 		"mixed_video_id_map": map[string][]string{contentType: {vid}},
 	})
 	var compressedBody bytes.Buffer
@@ -1118,6 +1505,13 @@ func miniReelNativeOptionsAttemptPolicyForContentType(ctx context.Context, vid, 
 	if err := decoder.Decode(&envelope); err != nil || envelope == nil {
 		return nil, errors.New("MiniReel multi_video_model response is invalid JSON")
 	}
+	return miniReelOptionsFromEnvelope(ctx, vid, envelope, client, codecMode, &diagnostic)
+}
+
+// Decode the common video model shape returned by both the legacy POST and the
+// current video_tab GET endpoint. Keeping this parser shared prevents a new
+// transport path from drifting in codec, encryption, or fallback handling.
+func miniReelOptionsFromEnvelope(ctx context.Context, vid string, envelope map[string]any, client *http.Client, codecMode string, diagnostic *playbackPreparationDiagnostic) (options []miniReelOption, err error) {
 	if code := miniReelBusinessCodeFromEnvelope(envelope); code != "" && code != "0" {
 		diagnostic.Code = "VIDEO_MODEL_BUSINESS"
 		diagnostic.BusinessCode = safePlaybackBusinessCode(code)
@@ -1237,6 +1631,152 @@ func miniReelNativeOptionsAttemptPolicyForContentType(ctx context.Context, vid, 
 		options = append(options, miniReelOption{URL: mediaURL, Key: key, Codec: codec, Width: width, Height: height, Quality: quality, Duration: miniReelIntFromAny(optionModel["video_duration"])})
 	}
 	return options, nil
+}
+
+// The official video_tab API returns the model under data.video_model_data.
+// Normalize it to the legacy envelope so the shared parser remains the sole
+// owner of codec and fallback behavior.
+func miniReelVideoTabEnvelope(vid string, root map[string]any) (map[string]any, bool) {
+	data, ok := asMap(root["data"])
+	if !ok {
+		return nil, false
+	}
+	rows, ok := asMap(data["video_model_data"])
+	if !ok {
+		rows = data
+	}
+	row, ok := asMap(rows[vid])
+	if !ok {
+		for _, value := range rows {
+			if candidate, candidateOK := asMap(value); candidateOK {
+				if _, hasModel := candidate["video_model"]; hasModel {
+					row = candidate
+					ok = true
+					break
+				}
+			}
+		}
+	}
+	if !ok {
+		return nil, false
+	}
+	model := row["video_model"]
+	if text := miniReelToString(model); strings.HasPrefix(strings.TrimSpace(text), "{") {
+		var decoded any
+		if err := json.Unmarshal([]byte(text), &decoded); err == nil {
+			model = decoded
+		}
+	}
+	return map[string]any{
+		"code": 0,
+		"data": map[string]any{
+			vid: map[string]any{"video_model": model},
+		},
+	}, true
+}
+
+// Fetch the current official playback model. It is intentionally a single
+// bounded GET; old multi_video_model recovery remains the fallback path.
+func miniReelVideoTabOptions(ctx context.Context, vid, endpoint string, device miniReelDevice, codecMode string) (options []miniReelOption, err error) {
+	started := time.Now()
+	diagnostic := playbackPreparationDiagnostic{Code: "VIDEO_TAB_TRANSPORT", Stage: "video_tab", Attempt: 1}
+	defer func() { err = finishPlaybackPreparation(err, diagnostic, started) }()
+	codecMode, err = normalizeMiniReelCodecMode(codecMode)
+	if err != nil {
+		return nil, err
+	}
+	stamp := time.Now().UnixMilli()
+	params := url.Values{
+		"_rticket":                  {strconv.FormatInt(stamp, 10)},
+		"ac":                        {"wifi"},
+		"aid":                       {"8662"},
+		"app_name":                  {"novelread"},
+		"channel":                   {"update_64"},
+		"cdid":                      {device.cdid},
+		"device_brand":              {"Redmi"},
+		"device_id":                 {device.deviceID},
+		"device_platform":           {"android"},
+		"device_type":               {"25053RT47C"},
+		"dpi":                       {"520"},
+		"dragon_device_type":        {"phone"},
+		"host_abi":                  {"arm64-v8a"},
+		"iid":                       {device.installID},
+		"is_android_pad_screen":     {"0"},
+		"language":                  {"zh"},
+		"manifest_version_code":     {"71332"},
+		"need_personal_recommend":   {"1"},
+		"os":                        {"android"},
+		"os_api":                    {"36"},
+		"os_version":                {"16"},
+		"resolution":                {"1280*2772"},
+		"player_so_load":            {"1"},
+		"pv_player":                 {"71332"},
+		"ssmix":                     {"a"},
+		"update_version_code":       {"71332"},
+		"version_code":              {"71332"},
+		"version_name":              {"7.1.3.32"},
+		"compliance_status":         {"0"},
+		"video_id":                  {vid},
+		"video_id_type":             {"0"},
+		"device_level":              {"1"},
+		"need_all_video_definition": {"1"},
+		"need_mp4_align":            {"0"},
+		"use_os_player":             {"0"},
+		"video_platform":            {"1024"},
+		"source":                    {"0"},
+		"from_video_id":             {""},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+params.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", miniReelPlaybackUA)
+	req.Header.Set("Accept", "application/json; charset=utf-8")
+	if device.cookie != "" {
+		req.Header.Set("Cookie", device.cookie)
+	}
+	diagnostic.Code = "VIDEO_TAB_TRANSPORT"
+	resp, err := miniReelNoRedirectClient(nil, 35*time.Second).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	diagnostic.HTTPStatus = &resp.StatusCode
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("MiniReel video_tab API HTTP %d", resp.StatusCode)
+	}
+	diagnostic.Code = "VIDEO_TAB_READ"
+	data, err := miniReelReadLimited(resp.Body, miniReelMaxJSONBytes)
+	if err != nil {
+		return nil, err
+	}
+	responseBytes := len(data)
+	diagnostic.ResponseBytes = &responseBytes
+	if len(bytes.TrimSpace(data)) == 0 {
+		diagnostic.Code = "VIDEO_TAB_EMPTY"
+		return nil, &miniReelStreamMissError{cause: errMiniReelVideoModelEmpty}
+	}
+	diagnostic.Code = "VIDEO_TAB_JSON"
+	var root map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil || root == nil {
+		return nil, errors.New("MiniReel video_tab response is invalid JSON")
+	}
+	if code := miniReelBusinessCodeFromEnvelope(root); code != "" && code != "0" {
+		diagnostic.Code = "VIDEO_TAB_BUSINESS"
+		diagnostic.BusinessCode = safePlaybackBusinessCode(code)
+		return nil, &miniReelStreamMissError{
+			cause:        fmt.Errorf("MiniReel video_tab rejected request (code %s)", code),
+			businessCode: code,
+		}
+	}
+	envelope, ok := miniReelVideoTabEnvelope(vid, root)
+	if !ok {
+		diagnostic.Code = "VIDEO_TAB_MODEL_MISSING"
+		return nil, &miniReelStreamMissError{cause: errMiniReelVideoModelMissing}
+	}
+	return miniReelOptionsFromEnvelope(ctx, vid, envelope, nil, codecMode, &diagnostic)
 }
 
 func miniReelNoCompatibleOptionsError(codecMode string) error {
