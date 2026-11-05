@@ -376,8 +376,7 @@
   var followNotificationList = document.getElementById('follow-notification-list');
   var followNotificationItems = [];
   var followNotificationUnread = 0;
-  var followNotificationViewOpen = false;
-  var followNotificationReturnFocus = null;
+  var notificationGeneration = 0;
   var notificationCheckBusy = false;
   var notificationLastCheck = 0;
   var notificationPopupTimer = null;
@@ -643,7 +642,7 @@
     if (pageMode() === 'search') return searchPager;
     if (pageMode() === 'rank') return rankPager;
     if (pageMode() === 'new') return newMode === 'calendar' ? calendarPager : newPager;
-    if (pageMode() === 'follows') return followView === 'reservations' ? reservationPager : followPager;
+    if (pageMode() === 'follows') return followView === 'notifications' ? null : followView === 'reservations' ? reservationPager : followPager;
     if (isLibraryPage()) return libraryPager;
     return null;
   }
@@ -1306,7 +1305,7 @@
     if (pageMode() === 'support') return firstVisible('.support-card');
     if (isLibraryPage()) return firstVisible('.library-card') || firstVisible('.history-filter.is-active') || firstVisible('[data-action="library-discover"]') || firstVisible('.library-toolbar-button');
     if (pageMode() === 'new') return firstVisible('.new-tab.is-active') || firstNewTab();
-    if (pageMode() === 'follows') return followView === 'reservations' ? firstVisible('.reservation-tab.is-active') : followNotificationViewOpen ? firstNotificationFocus() : firstVisible('.follow-card') || firstVisible('#follow-notifications-open') || firstVisible('#follow-refresh');
+    if (pageMode() === 'follows') return firstVisible('.follow-tab.is-active') || firstVisible('.follow-tab');
     return document.querySelector('.page-placeholder-action');
   }
 
@@ -1715,13 +1714,13 @@
     if (zone === 'followActions') {
       if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? firstVisible('.follow-tab.is-active') || activeSidebar() : null);
       if (direction === 'up') return firstVisible('.follow-tab.is-active') || activeSidebar();
-      if (direction === 'down') return followView === 'reservations' ? firstVisible('.reservation-tab.is-active') : followNotificationViewOpen ? firstNotificationFocus() : firstVisible('.follow-card') || firstVisible('#follow-pagination .list-retry');
+      if (direction === 'down') return followView === 'notifications' ? firstNotificationFocus() : followView === 'reservations' ? firstVisible('.reservation-tab.is-active') : firstVisible('.follow-card') || firstVisible('#follow-pagination .list-retry');
       return null;
     }
     if (zone === 'followNotifications') {
-      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : null);
-      if (direction === 'up') return firstVisible('.follow-action') || firstVisible('.follow-tab.is-active') || activeSidebar();
-      if (direction === 'down') return firstVisible(current.id === 'follow-notifications-read-all' ? '.follow-notification-detail' : '.follow-notification-play') || current;
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? firstVisible('.follow-tab.is-active') || activeSidebar() : null);
+      if (direction === 'up') return firstVisible('.follow-tab.is-active') || activeSidebar();
+      if (direction === 'down') return firstVisible('.follow-notification-play') || firstVisible('.follow-notification-detail') || current;
       return null;
     }
     if (zone === 'followNotificationItems') {
@@ -1732,7 +1731,7 @@
         return rowActions[next] || (direction === 'left' && rowActions[0] === current ? activeSidebar() : null);
       }
       var actionSelector = current.classList.contains('follow-notification-play') ? '.follow-notification-play' : '.follow-notification-detail';
-      if (direction === 'up') return row && moveGrid(actionSelector, current, direction) || firstVisible(current.classList.contains('follow-notification-play') ? '#follow-notifications-back' : '#follow-notifications-read-all');
+      if (direction === 'up') return row && moveGrid(actionSelector, current, direction) || firstVisible('#follow-notifications-read-all') || firstVisible('.follow-tab.is-active') || activeSidebar();
       if (direction === 'down') return row && moveGrid(actionSelector, current, direction) || current;
       return null;
     }
@@ -1995,9 +1994,9 @@
       return null;
     }
     if (zone === 'followTabs') {
-      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : firstVisible(followNotificationViewOpen ? '#follow-notifications-back' : '#follow-notifications-open'));
+      if (direction === 'left' || direction === 'right') return moveWithinZone(zone, current, direction) || (direction === 'left' ? activeSidebar() : firstFollowViewFocus());
       if (direction === 'up') return activeSidebar();
-      if (direction === 'down') return followView === 'reservations' ? firstVisible('.reservation-tab.is-active') : followNotificationViewOpen ? firstVisible('#follow-notifications-back') : firstVisible('.follow-action') || firstVisible('.follow-card') || firstVisible('#follow-pagination .list-retry');
+      if (direction === 'down') return firstFollowViewFocus();
       return null;
     }
     return direction === 'right' ? firstContentFocus() : activeSidebar();
@@ -2391,17 +2390,23 @@
     } catch (ignored) {}
   }
   function renderNotificationBadge() {
+    var unread = notificationAccountKey() ? followNotificationUnread : 0;
     var badge = document.getElementById('follow-notifications-badge');
-    if (!badge) return;
-    badge.textContent = followNotificationUnread > 99 ? '99+' : String(followNotificationUnread);
-    badge.classList.toggle('is-hidden', followNotificationUnread < 1);
+    if (badge) {
+      badge.textContent = unread > 99 ? '99+' : String(unread);
+      badge.classList.toggle('is-hidden', unread < 1);
+    }
+    var sidebarBadge = document.getElementById('follow-sidebar-badge');
+    if (sidebarBadge) sidebarBadge.classList.toggle('is-hidden', unread < 1);
+    var sidebarItem = document.getElementById('sidebar-follows');
+    if (sidebarItem) sidebarItem.setAttribute('aria-label', unread > 0 ? uiText('ui.followHasUnread', '追更，有未读更新提醒') : uiText('nav.follow', '追更'));
   }
+  if (window.HongguoI18n && typeof window.HongguoI18n.onChange === 'function') window.HongguoI18n.onChange(renderNotificationBadge);
   function updateFollowNotificationAccess() {
-    var button = document.getElementById('follow-notifications-open');
-    if (!button) return;
-    var enabled = !!(accountData && accountData.logged_in);
-    button.classList.toggle('is-hidden', !enabled);
-    button.disabled = !enabled;
+    var button = document.getElementById('follow-notifications-read-all');
+    if (button) button.disabled = !notificationAccountKey() || followNotificationUnread < 1;
+    renderNotificationBadge();
+    if (followView === 'notifications') renderFollowNotifications();
   }
   function notificationCanPopup() {
     return !applicationInBackground && !applicationHidden() && !isPlaybackPage() && !detailModalOpen && !(typeof actorWorksOpen !== 'undefined' && actorWorksOpen) && !playerOptionsOpen && !discussionOpen && !confirmOpen && !supportModalOpen;
@@ -2433,10 +2438,14 @@
   }
   function renderFollowNotifications() {
     renderNotificationBadge();
+    var readAll = document.getElementById('follow-notifications-read-all');
+    if (readAll) readAll.disabled = !notificationAccountKey() || followNotificationUnread < 1;
     if (!followNotificationList) return;
     followNotificationList.innerHTML = '';
     if (!followNotificationItems.length) {
-      var empty = document.createElement('div'); empty.className = 'follow-notification-empty'; empty.textContent = uiText('ui.noUpdateNotifications', '暂无更新提醒'); followNotificationList.appendChild(empty); return;
+      var empty = document.createElement('div'); empty.className = 'follow-notification-empty';
+      empty.textContent = accountData && accountData.logged_in ? uiText('ui.noUpdateNotifications', '暂无更新提醒') : uiText('follow.notificationLogin', '登录红果账号后查看更新提醒。');
+      followNotificationList.appendChild(empty); return;
     }
     followNotificationItems.slice().reverse().forEach(function (item) {
       var drama = Object.assign({}, item.drama || {}, { series_id: (item.drama && item.drama.series_id) || item.series_id, title: (item.drama && item.drama.title) || item.title });
@@ -2475,10 +2484,10 @@
       else if (rowRect.bottom > bottom) list.scrollTop += rowRect.bottom - bottom;
     });
   }
-  function firstNotificationFocus() { return firstVisible('.follow-notification-play') || firstVisible('.follow-notification-detail') || firstVisible('#follow-notifications-back'); }
+  function firstNotificationFocus() { return firstVisible('.follow-notification-play') || firstVisible('.follow-notification-detail') || firstVisible('#follow-notifications-read-all') || firstVisible('.follow-tab.is-active'); }
   function acceptNotificationData(data, showNew) {
     var notificationView = document.getElementById('follow-notification-view');
-    var restoreFocus = followNotificationViewOpen && notificationView && notificationView.contains(document.activeElement);
+    var restoreFocus = followView === 'notifications' && notificationView && notificationView.contains(document.activeElement);
     var focusedKey = restoreFocus && document.activeElement.dataset ? document.activeElement.dataset.focus : '';
     var items = data && data.items || [];
     followNotificationItems = items.slice();
@@ -2486,7 +2495,7 @@
     renderFollowNotifications();
     if (restoreFocus) {
       var restored = null;
-      if (focusedKey) document.querySelectorAll('[data-focus]').forEach(function (node) { if (!restored && node.dataset.focus === focusedKey) restored = node; });
+      if (focusedKey) document.querySelectorAll('[data-focus]').forEach(function (node) { if (!restored && !node.disabled && node.dataset.focus === focusedKey) restored = node; });
       goFocus(restored || firstNotificationFocus());
     }
     if (!showNew) return;
@@ -2504,10 +2513,13 @@
   }
   function notificationCheck(force) {
     if (!notificationAccountKey() || notificationCheckBusy || applicationHidden() || applicationInBackground) return Promise.resolve(false);
+    var requestedAccount = notificationAccountKey();
+    var generation = notificationGeneration;
     var now = Date.now();
     if (!force && now - notificationLastCheck < 10 * 60 * 1000) { flushNotificationPopup(); return Promise.resolve(false); }
     notificationLastCheck = now; notificationCheckBusy = true;
     return fetchData('/api/v1/notifications').then(function (data) {
+      if (generation !== notificationGeneration || requestedAccount !== notificationAccountKey()) return false;
       var key = notificationAccountKey(); var first = notificationKnownKey !== key; notificationKnownKey = key;
       if (first) {
         // An existing account should not receive a toast for every old item on
@@ -2516,32 +2528,19 @@
       }
       acceptNotificationData(data, !first);
       return true;
-    }).catch(function (error) { if (followNotificationViewOpen) showNotice(uiText('ui.followReadFailed', '更新提醒暂时读取失败')); return false; })
+    }).catch(function (error) { if (generation === notificationGeneration && requestedAccount === notificationAccountKey() && followView === 'notifications') showNotice(uiText('ui.followReadFailed', '更新提醒暂时读取失败')); return false; })
       .then(function (ok) { notificationCheckBusy = false; flushNotificationPopup(); return ok; });
   }
-  function openFollowNotifications() {
-    followNotificationReturnFocus = document.activeElement;
-    followNotificationViewOpen = true;
-    followPage.classList.add('has-notifications');
-    if (followActions) followActions.classList.add('is-hidden');
-    followListView.classList.add('is-hidden'); followNotificationView.classList.remove('is-hidden');
-    renderFollowNotifications();
-    notificationCheck(true);
-    goFocus(firstNotificationFocus());
-  }
-  function closeFollowNotifications() {
-    followNotificationViewOpen = false; followNotificationView.classList.add('is-hidden'); followListView.classList.remove('is-hidden'); if (followActions) followActions.classList.remove('is-hidden');
-    followPage.classList.remove('has-notifications');
-    var target = followNotificationReturnFocus; followNotificationReturnFocus = null;
-    goFocus(target && document.contains(target) && !target.disabled ? target : document.getElementById('follow-notifications-open'));
-  }
   function markNotificationRead(id, row) {
-    if (!id) return;
+    if (!id || !notificationAccountKey()) return;
+    var generation = notificationGeneration;
+    var requestedAccount = notificationAccountKey();
     var target = row && row.dataset.focus;
     fetchData('/api/v1/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) }).then(function (data) {
+      if (generation !== notificationGeneration || requestedAccount !== notificationAccountKey()) return;
       acceptNotificationData(data, false);
-      if (target && followNotificationViewOpen) goFocus(document.querySelector('[data-focus="' + target.replace(/"/g, '') + '"]') || document.getElementById('follow-notifications-back'));
-    }).catch(function () { showNotice(uiText('ui.followMarkFailed', '更新提醒暂时无法标记')); });
+      if (target && followView === 'notifications') goFocus(document.querySelector('[data-focus="' + target.replace(/"/g, '') + '"]') || firstVisible('#follow-notifications-read-all'));
+    }).catch(function () { if (generation === notificationGeneration && requestedAccount === notificationAccountKey()) showNotice(uiText('ui.followMarkFailed', '更新提醒暂时无法标记')); });
   }
 
   function isPlaybackPage() { return pageMode() === 'recommend' || pageMode() === 'player'; }
@@ -3190,7 +3189,6 @@
     if (supportModalOpen) { closeSupportQR(); return true; }
     var playbackHint = document && typeof document.getElementById === 'function' ? document.getElementById('playback-menu-hint') : null;
     if (playbackHint && !playbackHint.classList.contains('is-hidden')) { if (typeof closePlaybackMenuHint === 'function') closePlaybackMenuHint(); return true; }
-    if (followNotificationViewOpen) { closeFollowNotifications(); return true; }
     if (rankFilterOpen) { closeRankFilter(true); return true; }
     if (typeof actorWorksOpen !== 'undefined' && actorWorksOpen) { closeActorWorks(true); return true; }
     if (detailCastOpen) { closeDetailCast(true); return true; }
@@ -3678,6 +3676,11 @@
     accountCountdownUntil = Date.now() + (data.retry_after || 0) * 1000;
     if (owner !== previousOwner || owner !== (libraryData.owner_id || '')) {
       ++accountEpoch;
+      ++notificationGeneration;
+      followNotificationItems = [];
+      followNotificationUnread = 0;
+      renderNotificationBadge();
+      if (followView === 'notifications') renderFollowNotifications();
       resetEndRecommendations();
       notificationKnownKey = '';
       notificationLastCheck = 0;
@@ -7066,26 +7069,34 @@
     goFocus(firstVisible('.library-tab[data-library-view="' + kind + '"]'));
   }
 
+  function firstFollowViewFocus() {
+    if (followView === 'notifications') return firstNotificationFocus();
+    if (followView === 'reservations') return firstVisible('.reservation-tab.is-active');
+    return firstVisible('.follow-action') || firstVisible('.follow-card') || firstVisible('#follow-pagination .list-retry');
+  }
   function switchFollowView(view, shouldFocus, restoring) {
-    followView = view === 'reservations' ? 'reservations' : 'follow';
+    followView = view === 'notifications' || view === 'reservations' ? view : 'follow';
     var reservations = followView === 'reservations';
-    if (reservations && followNotificationViewOpen) {
-      followNotificationViewOpen = false;
-      followNotificationReturnFocus = null;
-    }
+    var showNotifications = followView === 'notifications';
     document.querySelectorAll('.follow-tab').forEach(function (tab) {
       var selected = tab.dataset.followView === followView;
       tab.classList.toggle('is-active', selected);
       tab.setAttribute('aria-selected', String(selected));
     });
-    var showNotifications = !reservations && followNotificationViewOpen;
     followPage.classList.toggle('has-notifications', showNotifications);
     followListView.classList.toggle('is-hidden', reservations || showNotifications);
     followNotificationView.classList.toggle('is-hidden', !showNotifications);
+    followListView.setAttribute('aria-hidden', String(reservations || showNotifications));
+    followNotificationView.setAttribute('aria-hidden', String(!showNotifications));
     if (followActions) followActions.classList.toggle('is-hidden', reservations || showNotifications);
-    document.getElementById('reservations-view').classList.toggle('is-hidden', !reservations);
+    var reservationsView = document.getElementById('reservations-view');
+    reservationsView.classList.toggle('is-hidden', !reservations);
+    reservationsView.setAttribute('aria-hidden', String(!reservations));
     if (reservations) {
       renderReservations(reservationMode, restoring);
+    } else if (showNotifications) {
+      renderFollowNotifications();
+      notificationCheck(true);
     } else if (!accountData || !accountData.logged_in) {
       renderMessage(followGrid, 'list-empty', uiText('ui.followLogin', '登录红果账号后查看追更。'));
     } else if (!followPager.loaded) {
@@ -7093,7 +7104,7 @@
     } else {
       queueTailCheck();
     }
-    if (shouldFocus !== false) goFocus(firstVisible('.follow-tab.is-active'));
+    if (shouldFocus !== false) goFocus(firstFollowViewFocus() || firstVisible('.follow-tab.is-active'));
   }
 
   function submitSearch() {
@@ -7748,7 +7759,7 @@
     document.getElementById('hero-video').pause();
     resetPlayerUI();
     document.querySelectorAll('.side-item').forEach(function (node) { node.classList.toggle('is-active', node === item); });
-    var label = item.querySelector('span:last-child');
+    var label = item.querySelector('[data-i18n]');
     shell.dataset.mode = item.dataset.page || 'recommend';
     if (typeof syncNativePlaybackPageState === 'function') syncNativePlaybackPageState();
     document.getElementById('page-context').textContent = label ? label.textContent : uiText('ui.page', '页面');
@@ -8097,13 +8108,15 @@
     button.addEventListener('click', function () { selectLibraryType(button.dataset.libraryType); });
   });
   document.getElementById('follow-refresh').addEventListener('click', function () { followPager.reset({}); });
-  document.getElementById('follow-notifications-open').addEventListener('click', openFollowNotifications);
-  document.getElementById('follow-notifications-back').addEventListener('click', closeFollowNotifications);
   document.getElementById('follow-notifications-read-all').addEventListener('click', function () {
+    if (!notificationAccountKey() || !followNotificationUnread) return;
+    var generation = notificationGeneration;
+    var requestedAccount = notificationAccountKey();
     var target = document.activeElement;
     fetchData('/api/v1/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all: true }) }).then(function (data) {
+      if (generation !== notificationGeneration || requestedAccount !== notificationAccountKey()) return;
       acceptNotificationData(data, false);
-      if (followNotificationViewOpen) goFocus(target && target.id === 'follow-notifications-read-all' ? target : firstVisible('#follow-notifications-back'));
+      if (followView === 'notifications') goFocus(target && !target.disabled && target.id === 'follow-notifications-read-all' ? target : firstNotificationFocus());
   }).catch(function () { showNotice(uiText('ui.followMarkFailed', '更新提醒暂时无法标记')); });
   });
   document.getElementById('notification-popup').addEventListener('click', notificationHidePopup);
